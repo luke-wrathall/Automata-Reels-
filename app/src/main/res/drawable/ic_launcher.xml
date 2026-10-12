@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Rule 90 triangle on a dark tile -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="16"
+    android:viewportHeight="16">
+    <path android:fillColor="#111318" android:pathData="M0,0h16v16h-16z" />
+    <path android:fillColor="#FF4F81"
+        android:pathData="M7.5,2h1v1h-1zM6.5,3h1v1h-1zM8.5,3h1v1h-1zM5.5,4h1v1h-1zM9.5,4h1v1h-1zM4.5,5h1v1h-1zM6.5,5h1v1h-1zM8.5,5h1v1h-1zM10.5,5h1v1h-1zM3.5,6h1v1h-1zM11.5,6h1v1h-1zM2.5,7h1v1h-1zM4.5,7h1v1h-1zM10.5,7h1v1h-1zM12.5,7h1v1h-1zM1.5,8h1v1h-1zM5.5,8h1v1h-1zM9.5,8h1v1h-1zM13.5,8h1v1h-1z" />
+</vector>
