@@ -10,7 +10,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
+import androidx.compose.animation.core.withInfiniteAnimationFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
@@ -43,8 +43,7 @@ class AutomatonRenderer(val spec: ReelSpec, val rows: Int) {
     var filled = 0
         private set
 
-    /** Fractional progress toward the next generation, used for smooth scrolling. */
-    private var phase = 0f
+    private val clock = RowClock()
 
     val generation get() = sim.generation
     val background get() = colors[0]
@@ -60,16 +59,8 @@ class AutomatonRenderer(val spec: ReelSpec, val rows: Int) {
 
     fun advanceRows(n: Int) = repeat(n) { writeRow() }
 
-    /** Advances by [rowsDelta] generations' worth of time, writing at most [maxRows] rows. */
-    fun advanceTime(rowsDelta: Float, maxRows: Int = 12) {
-        phase += rowsDelta
-        var written = 0
-        while (phase >= 1f) {
-            phase -= 1f
-            if (written++ < maxRows) writeRow()
-        }
-        if (filled < rows) phase = 0f
-    }
+    /** Advances by [rowsDelta] generations' worth of time. */
+    fun advanceTime(rowsDelta: Float) = advanceRows(clock.advance(rowsDelta))
 
     fun draw(scope: DrawScope) = with(scope) {
         val w = size.width.roundToInt()
@@ -87,7 +78,7 @@ class AutomatonRenderer(val spec: ReelSpec, val rows: Int) {
             return@with
         }
         // Oldest row is at `head`; draw head..end, then 0..head-1, shifted up by the scroll phase.
-        val yOff = -phase * cell
+        val yOff = -clock.phase * cell
         val n1 = rows - head
         val top1 = yOff.roundToInt()
         val bottom1 = (yOff + n1 * cell).roundToInt()
@@ -114,6 +105,22 @@ class AutomatonRenderer(val spec: ReelSpec, val rows: Int) {
 }
 
 /**
+ * Turns elapsed time (in rows) into whole rows to write, carrying the fraction between frames so
+ * any frame rate produces the same speed. [phase] is the fraction toward the next row.
+ */
+class RowClock(private val maxRowsPerFrame: Int = 12) {
+    var phase = 0f
+        private set
+
+    fun advance(rowsDelta: Float): Int {
+        phase += rowsDelta
+        val whole = phase.toInt()
+        phase -= whole
+        return minOf(whole, maxRowsPerFrame)
+    }
+}
+
+/**
  * Draws [spec] filling the available space, growing downward while [playing].
  * Changing [restartKey] restarts the reel from its first generation.
  */
@@ -125,7 +132,6 @@ fun AutomatonView(
     restartKey: Int = 0,
     rowsPerSecond: Float = 45f,
     prefillFraction: Float = 0.3f,
-    onGeneration: (Int) -> Unit = {},
 ) {
     BoxWithConstraints(modifier) {
         val widthPx = constraints.maxWidth
@@ -142,7 +148,7 @@ fun AutomatonView(
             if (!playing) return@LaunchedEffect
             var last = -1L
             while (true) {
-                withFrameNanos { now ->
+                withInfiniteAnimationFrameNanos { now ->
                     if (last > 0) {
                         val dt = (now - last) / 1_000_000_000f
                         renderer.advanceTime(min(dt, 0.1f) * rowsPerSecond)
@@ -150,7 +156,6 @@ fun AutomatonView(
                     last = now
                 }
                 frame++
-                onGeneration(renderer.generation)
             }
         }
 

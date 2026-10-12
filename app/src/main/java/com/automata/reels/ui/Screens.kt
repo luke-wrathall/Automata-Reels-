@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
@@ -43,6 +45,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.layout.ContentScale
@@ -102,9 +105,11 @@ fun FeedScreen(vm: FeedViewModel, onOpenFavorites: () -> Unit) {
                 LaunchedEffect(pager) {
                     snapshotFlow { pager.settledPage }.collect { vm.onPageVisible(mode, it) }
                 }
+
                 VerticalPager(
                     state = pager,
                     beyondViewportPageCount = 1,
+                    flingBehavior = reelFling(pager),
                     modifier = Modifier.fillMaxSize().testTag("feed-pager"),
                 ) { page ->
                     val reel = reels[page]
@@ -129,6 +134,11 @@ fun FeedScreen(vm: FeedViewModel, onOpenFavorites: () -> Unit) {
     }
 }
 
+/** Like Reels, a short flick (a quarter of the screen) is enough to move to the next reel. */
+@Composable
+private fun reelFling(state: PagerState) =
+    PagerDefaults.flingBehavior(state = state, snapPositionalThreshold = 0.25f)
+
 @Composable
 private fun FeedTopBar(
     mode: FeedMode,
@@ -140,7 +150,7 @@ private fun FeedTopBar(
     Box(
         modifier
             .fillMaxWidth()
-            .background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(Color(0x88000000), Color.Transparent)))
+            .background(Brush.verticalGradient(listOf(Color(0x88000000), Color.Transparent)))
             .windowInsetsPadding(WindowInsets.statusBars)
             .padding(horizontal = 8.dp, vertical = 6.dp)
     ) {
@@ -240,8 +250,12 @@ private fun FavoriteTile(reel: ScoredReel, modifier: Modifier) {
             spec.rule.title,
             color = Color.White,
             fontSize = 10.sp,
-            style = TextStyle(shadow = androidx.compose.ui.graphics.Shadow(Color.Black, blurRadius = 4f)),
-            modifier = Modifier.align(Alignment.BottomStart).padding(4.dp),
+            maxLines = 1,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xAA000000))))
+                .padding(start = 4.dp, end = 4.dp, top = 10.dp, bottom = 3.dp),
         )
     }
 }
@@ -256,7 +270,12 @@ fun FavoriteViewer(vm: FeedViewModel, start: Int, onBack: () -> Unit) {
     }
     val pager = rememberPagerState(initialPage = start.coerceIn(0, items.size - 1)) { items.size }
     Box(Modifier.fillMaxSize()) {
-        VerticalPager(state = pager, beyondViewportPageCount = 1, modifier = Modifier.fillMaxSize()) { page ->
+        VerticalPager(
+            state = pager,
+            beyondViewportPageCount = 1,
+            flingBehavior = reelFling(pager),
+            modifier = Modifier.fillMaxSize(),
+        ) { page ->
             val reel = items[page]
             ReelPage(
                 reel = reel,

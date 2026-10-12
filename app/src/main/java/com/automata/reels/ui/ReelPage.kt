@@ -113,8 +113,8 @@ fun ReelPage(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .height(180.dp)
-                .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0x99000000))))
+                .height(240.dp)
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0x80000000), Color(0xB3000000))))
         )
 
         AnimatedVisibility(

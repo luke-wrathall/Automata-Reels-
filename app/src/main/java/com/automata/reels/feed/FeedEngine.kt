@@ -6,6 +6,7 @@ import com.automata.reels.ca.InterestReport
 import com.automata.reels.ca.ReelSpec
 import com.automata.reels.ca.RuleKind
 import com.automata.reels.ca.SeedType
+import java.util.stream.Collectors
 import kotlin.math.exp
 import kotlin.random.Random
 
@@ -19,8 +20,13 @@ class ScoredReel(val spec: ReelSpec, val report: InterestReport)
 /**
  * Produces an endless stream of reels for one [mode].
  *
- * Each pick draws a pool of random candidates, measures every one with [Interest.analyze], and samples
- * one with probability proportional to exp(adjusted score / temperature). Liked reels steer the pool
+ * Each pick first chooses a start type (single cell, random, sparse): their patterns differ so much
+ * that scores are only comparable within one start type, and choosing it up front keeps the feed's
+ * mix of looks stable. It then draws a pool of random candidates with that start type, measures every
+ * one with [Interest.analyze], and samples
+ * one with probability proportional to exp(adjusted score / temperature). If nothing in the pool is
+ * interesting enough, more candidates are drawn (most of rule space is dull). In elementary mode the
+ * space is small, so measured scores are remembered per rule and start type and reused as estimates. Liked reels steer the pool
  * in two ways: some candidates are mutations of liked rules, and candidates whose measured behaviour
  * resembles a liked reel get a bonus. Candidates that behave like something shown very recently get
  * a penalty, so many rules with the same look don't crowd the feed.
@@ -28,43 +34,100 @@ class ScoredReel(val spec: ReelSpec, val report: InterestReport)
 class FeedEngine(
     val mode: FeedMode,
     private val rng: Random = Random.Default,
-    private val poolSize: Int = 10,
+    private val poolSize: Int = if (mode == FeedMode.ELEMENTARY) 16 else 10,
     private val temperature: Double = 0.08,
     private val analyze: (ReelSpec) -> InterestReport = { Interest.analyze(it) },
 ) {
+    /** How many recent picks can't be repeated. Elementary space has few great rules, so it's shorter. */
+    val recentMemory = if (mode == FeedMode.ELEMENTARY) 12 else 30
     private val recent = ArrayDeque<String>()
-    private val recentFeatures = ArrayDeque<DoubleArray>()
+    private val recentReports = ArrayDeque<InterestReport>()
+    private val estimates = HashMap<String, InterestReport>()
 
     fun next(likes: List<ScoredReel> = emptyList()): ScoredReel {
         val relevantLikes = likes.filter { inMode(it.spec) }
-        val pool = ArrayList<ScoredReel>(poolSize)
-        var attempts = 0
-        while (pool.size < poolSize && attempts < poolSize * 4) {
-            attempts++
-            val spec = if (relevantLikes.isNotEmpty() && rng.nextDouble() < mutationChance(relevantLikes.size)) {
-                mutate(relevantLikes[rng.nextInt(relevantLikes.size)].spec)
-            } else {
-                randomSpec()
-            }
-            if (spec.ruleKey in recent) continue
-            pool += ScoredReel(spec, analyze(spec))
+        // Some picks explore liked territory: the start type of a liked reel, and a pool made mostly
+        // of its mutations. The rest explore freely (the like bonus still applies to them).
+        val exploit = relevantLikes.isNotEmpty() && rng.nextDouble() < mutationChance(relevantLikes.size)
+        val seedType = if (exploit) relevantLikes[rng.nextInt(relevantLikes.size)].spec.seedType else randomSeedType()
+        val parents = if (exploit) relevantLikes.filter { it.spec.seedType == seedType } else emptyList()
+        val pool = ArrayList<ScoredReel>()
+        for (round in 0 until MAX_ROUNDS) {
+            pool += scoreAll(drawCandidates(seedType, parents, exclude = pool.map { it.spec.ruleKey }.toSet()))
+            if (pool.isNotEmpty() && pool.maxOf { adjustedScore(it, likes) } >= GOOD_ENOUGH) break
         }
-        val weights = pool.map { exp(adjustedScore(it, likes) / temperature) }
-        val chosen = pool[weightedIndex(weights)]
+        val finalists = pickFinalists(pool, likes)
+        val weights = finalists.map { exp(adjustedScore(it, likes) / temperature) }
+        val chosen = finalists[weightedIndex(weights)]
+        analyzedThisPick.clear()
         recent.addLast(chosen.spec.ruleKey)
-        while (recent.size > RECENT_MEMORY) recent.removeFirst()
-        recentFeatures.addLast(chosen.report.features())
-        while (recentFeatures.size > LOOKALIKE_MEMORY) recentFeatures.removeFirst()
+        while (recent.size > recentMemory) recent.removeFirst()
+        recentReports.addLast(chosen.report)
+        while (recentReports.size > LOOKALIKE_MEMORY) recentReports.removeFirst()
         return chosen
+    }
+
+    private val analyzedThisPick = HashMap<ReelSpec, InterestReport>()
+
+    /**
+     * The best few candidates, all measured on their own random start (remembered estimates came
+     * from other starts, so a finalist can turn out worse; then the next best moves up). Sampling
+     * only among finalists stops many dull candidates' small weights adding up to beat good ones.
+     */
+    private fun pickFinalists(pool: MutableList<ScoredReel>, likes: List<ScoredReel>): List<ScoredReel> {
+        while (true) {
+            pool.sortByDescending { adjustedScore(it, likes) }
+            val top = pool.take(FINALISTS)
+            val stale = top.filter { it.report !== analyzedThisPick[it.spec] }
+            if (stale.isEmpty()) {
+                val best = adjustedScore(top[0], likes)
+                return top.filter { adjustedScore(it, likes) >= best - FINALIST_MARGIN }
+            }
+            val fresh = scoreAll(stale.map { it.spec }, useEstimates = false).associateBy { it.spec }
+            pool.replaceAll { fresh[it.spec] ?: it }
+        }
+    }
+
+    private fun drawCandidates(seedType: SeedType, parents: List<ScoredReel>, exclude: Set<String>): List<ReelSpec> {
+        val specs = ArrayList<ReelSpec>(poolSize)
+        var attempts = 0
+        while (specs.size < poolSize && attempts < poolSize * 4) {
+            attempts++
+            val spec = if (parents.isNotEmpty() && rng.nextDouble() < EXPLOIT_MUTANT_SHARE) {
+                mutate(parents[rng.nextInt(parents.size)].spec).copy(seedType = seedType)
+            } else {
+                randomSpec(seedType)
+            }
+            val key = spec.ruleKey
+            if (key in recent || key in exclude || specs.any { it.ruleKey == key }) continue
+            specs += spec
+        }
+        return specs
+    }
+
+    /**
+     * Scores candidates, reusing remembered estimates in elementary mode. Simulations are independent,
+     * so they run across cores; candidate generation stays sequential so a seeded Random reproduces.
+     */
+    private fun scoreAll(specs: List<ReelSpec>, useEstimates: Boolean = mode == FeedMode.ELEMENTARY): List<ScoredReel> {
+        val known = if (useEstimates) specs.mapNotNull { s -> estimates[s.ruleKey]?.let { ScoredReel(s, it) } } else emptyList()
+        val unknown = specs.filter { s -> known.none { it.spec === s } }
+        val measured = unknown.parallelStream().map { ScoredReel(it, analyze(it)) }.collect(Collectors.toList())
+        for (m in measured) {
+            analyzedThisPick[m.spec] = m.report
+            if (mode == FeedMode.ELEMENTARY) estimates[m.spec.ruleKey] = m.report
+        }
+        return known + measured
     }
 
     fun inMode(spec: ReelSpec): Boolean =
         (spec.rule.kind == RuleKind.ELEMENTARY) == (mode == FeedMode.ELEMENTARY)
 
-    internal fun mutationChance(likeCount: Int): Double = minOf(0.5, 0.2 + 0.05 * likeCount)
+    internal fun mutationChance(likeCount: Int): Double = minOf(0.6, 0.3 + 0.05 * likeCount)
 
+    /** Score after taste and variety adjustments. The lookalike factor scales, so it can't push a good reel below a dull one. */
     internal fun adjustedScore(candidate: ScoredReel, likes: List<ScoredReel>): Double =
-        candidate.report.score + preferenceBonus(candidate, likes) - lookalikePenalty(candidate.report)
+        candidate.report.score * (1 - lookalikePenalty(candidate.report)) + preferenceBonus(candidate, likes)
 
     /**
      * Bonus for candidates similar to something the user liked: either behaving alike (measured
@@ -85,9 +148,9 @@ class FeedEngine(
         return x * x
     }
 
-    /** Penalty for candidates that behave like something shown in the last few reels. */
+    /** Fraction taken off candidates that would look like something shown in the last few reels. */
     internal fun lookalikePenalty(report: InterestReport): Double =
-        LOOKALIKE_PENALTY * maxSimilarity(report.features(), recentFeatures)
+        LOOKALIKE_PENALTY * (recentReports.maxOfOrNull { report.lookSimilarity(it) } ?: 0.0)
 
     private fun maxSimilarity(f: DoubleArray, others: Collection<DoubleArray>): Double {
         var best = 0.0
@@ -99,14 +162,14 @@ class FeedEngine(
         return best
     }
 
-    fun randomSpec(): ReelSpec {
+    fun randomSpec(seedType: SeedType = randomSeedType()): ReelSpec {
         val rule = when (mode) {
             FeedMode.ELEMENTARY -> CaRule.elementary(rng.nextInt(256))
             FeedMode.VARIED -> randomVariedRule()
         }
         return ReelSpec(
             rule = rule,
-            seedType = randomSeedType(),
+            seedType = seedType,
             seed = rng.nextLong(),
             width = randomWidth(rule.r),
             palette = rng.nextInt(Palettes.all.size),
@@ -117,13 +180,10 @@ class FeedEngine(
     fun mutate(spec: ReelSpec): ReelSpec {
         val old = spec.rule
         val table = old.table.copyOf()
-        val changes = 1 + rng.nextInt(2)
-        repeat(changes) {
-            // Leave entry 0 alone for quiescent rules so the background stays stable.
-            val from = if (old.isQuiescent && table.size > 1) 1 else 0
-            val i = from + rng.nextInt(table.size - from)
-            table[i] = (table[i] + 1 + rng.nextInt(old.k - 1)) % old.k
-        }
+        // Leave entry 0 alone for quiescent rules so the background stays stable.
+        val from = if (old.isQuiescent && table.size > 1) 1 else 0
+        val positions = (from until table.size).shuffled(rng).take(1 + rng.nextInt(2))
+        for (i in positions) table[i] = (table[i] + 1 + rng.nextInt(old.k - 1)) % old.k
         val rule = CaRule(old.kind, old.k, old.r, table)
         return spec.copy(
             rule = rule,
@@ -190,10 +250,14 @@ class FeedEngine(
     }
 
     companion object {
-        const val RECENT_MEMORY = 30
-        const val LIKE_BONUS = 0.15
+        const val LIKE_BONUS = 0.2
+        const val MAX_ROUNDS = 3
+        const val FINALISTS = 3
+        const val FINALIST_MARGIN = 0.15
+        const val EXPLOIT_MUTANT_SHARE = 0.6
+        const val GOOD_ENOUGH = 0.4
         const val SIMILARITY_WIDTH = 0.08
-        const val LOOKALIKE_MEMORY = 6
-        const val LOOKALIKE_PENALTY = 0.2
+        const val LOOKALIKE_MEMORY = 4
+        const val LOOKALIKE_PENALTY = 0.3
     }
 }

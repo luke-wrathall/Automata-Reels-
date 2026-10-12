@@ -1,6 +1,7 @@
 package com.automata.reels.ca
 
 import java.util.zip.Deflater
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.max
@@ -43,12 +44,30 @@ data class InterestReport(
     val period: Int,
     /** Generation at which the periodic behaviour sets in. */
     val transient: Int,
+    /**
+     * Coarse picture of the diagram: share of non-background cells in each block of a
+     * [SILHOUETTE_SIZE] x [SILHOUETTE_SIZE] grid over time x space. Used to tell reels that would
+     * look alike on screen (e.g. many rules all drawing nested triangles) apart from ones that don't.
+     */
+    val silhouette: DoubleArray = DoubleArray(SILHOUETTE_SIZE * SILHOUETTE_SIZE),
 ) {
+    /** 1 when two reels would look about the same on screen, falling towards 0 as they differ. */
+    fun lookSimilarity(other: InterestReport): Double {
+        var d = 0.0
+        for (i in silhouette.indices) d += abs(silhouette[i] - other.silhouette[i])
+        d /= silhouette.size
+        return exp(-sq(d / 0.12))
+    }
+
     /** Feature vector used to compare reels with each other (for like-based tuning). */
     fun features(): DoubleArray = doubleArrayOf(
         compression, multiscale, inputEntropyMean, inputEntropyStd * 4, damage, changeRate, density,
     )
 }
+
+const val SILHOUETTE_SIZE = 4
+
+private fun sq(x: Double) = x * x
 
 object Interest {
     const val DEFAULT_STEPS = 360
@@ -85,8 +104,10 @@ object Interest {
         for (row in rows) for (v in row) if (v != 0) nonZero++
         val density = nonZero.toDouble() / (rows.size.toLong() * w)
 
-        // Input entropy statistics, skipping the first few generations where the seed dominates.
-        val warm = min(10, steps / 4)
+        // Input entropy statistics, measured once information from any cell could have reached every
+        // other cell. Before that, a pattern growing from a seed changes entropy just by expanding,
+        // which says nothing about structures interacting.
+        val warm = min(steps / 2, (w + 2 * rule.r - 1) / (2 * rule.r))
         val ie = entropies.copyOfRange(warm, steps)
         val ieMean = ie.average()
         val ieStd = sqrt(ie.sumOf { (it - ieMean) * (it - ieMean) } / ie.size)
@@ -123,7 +144,28 @@ object Interest {
             dies = dies,
             period = period,
             transient = transient,
+            silhouette = silhouette(rows),
         )
+    }
+
+    internal fun silhouette(rows: List<IntArray>): DoubleArray {
+        val n = SILHOUETTE_SIZE
+        val w = rows[0].size
+        val counts = HashMap<Int, Int>()
+        for (row in rows) for (v in row) counts[v] = (counts[v] ?: 0) + 1
+        val background = counts.maxByOrNull { it.value }!!.key
+        val filled = DoubleArray(n * n)
+        val total = DoubleArray(n * n)
+        for (t in rows.indices) {
+            val by = t * n / rows.size
+            val row = rows[t]
+            for (x in 0 until w) {
+                val i = by * n + x * n / w
+                total[i]++
+                if (row[x] != background) filled[i]++
+            }
+        }
+        return DoubleArray(n * n) { if (total[it] > 0) filled[it] / total[it] else 0.0 }
     }
 
     /**
@@ -296,5 +338,4 @@ object Interest {
         return min(1.0, avg / expected)
     }
 
-    private fun sq(x: Double) = x * x
 }

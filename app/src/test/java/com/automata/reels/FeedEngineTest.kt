@@ -42,9 +42,21 @@ class FeedEngineTest {
     }
 
     @Test
+    fun feedHasNoDullReelsAndAMixOfStartTypes() {
+        for (mode in FeedMode.entries) {
+            val engine = FeedEngine(mode, Random(8))
+            val picks = (0 until 40).map { engine.next() }
+            val worst = picks.minOf { it.report.score }
+            assertTrue("$mode worst pick scored $worst", worst >= 0.2)
+            val single = picks.count { it.spec.seedType == SeedType.SINGLE }
+            assertTrue("$mode single-cell picks: $single/40", single in 6..24)
+        }
+    }
+
+    @Test
     fun noRuleRepeatsWithinRecentMemory() {
         val engine = FeedEngine(FeedMode.ELEMENTARY, Random(5))
-        val keys = (0 until FeedEngine.RECENT_MEMORY).map { engine.next().spec.ruleKey }
+        val keys = (0 until engine.recentMemory).map { engine.next().spec.ruleKey }
         assertEquals(keys.size, keys.toSet().size)
     }
 
@@ -61,7 +73,9 @@ class FeedEngineTest {
         }
         val without = (1..3).sumOf { nearLiked(it, false) }
         val with = (1..3).sumOf { nearLiked(it, true) }
-        assertTrue("near-liked picks: without=$without with=$with", with > without * 2 && with >= 15)
+        // Most rules near a liked one are dull, and the feed shouldn't serve those just for being
+        // related, so the pull from a single like is bounded (about 2x in practice).
+        assertTrue("near-liked picks: without=$without with=$with", with >= without * 1.5 && with - without >= 15)
     }
 
     @Test

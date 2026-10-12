@@ -1,6 +1,9 @@
 package com.automata.reels.ui
 
 import android.app.Application
+import android.content.Context
+import android.os.SystemClock
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -21,7 +24,7 @@ import kotlinx.coroutines.withContext
 
 class FeedViewModel(app: Application) : AndroidViewModel(app) {
     private val store = FavoritesStore(app)
-    private val prefs = app.getSharedPreferences("settings", Application.MODE_PRIVATE)
+    private val prefs = app.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
     var mode by mutableStateOf(
         runCatching { FeedMode.valueOf(prefs.getString("mode", null) ?: "") }.getOrDefault(FeedMode.ELEMENTARY)
@@ -56,6 +59,7 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
     /** Records the visible page and makes sure reels further down the feed are ready. */
     fun onPageVisible(mode: FeedMode, page: Int) {
         pagePositions[mode] = page
+        Log.d(TAG, "$mode page $page visible")
         ensureAhead(mode, page)
     }
 
@@ -66,7 +70,11 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
             while (list.size <= pagePositions.getOrDefault(mode, page) + PREFETCH) {
                 val likes = favorites.toList()
                 val engine = engines.getValue(mode)
-                list += withContext(Dispatchers.Default) { engine.next(likes) }
+                val start = SystemClock.elapsedRealtime()
+                val reel = withContext(Dispatchers.Default) { engine.next(likes) }
+                Log.d(TAG, "$mode pick ${list.size}: ${reel.spec.rule} score=%.2f in %d ms".format(
+                    reel.report.score, SystemClock.elapsedRealtime() - start))
+                list += reel
             }
         }
     }
@@ -90,5 +98,6 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val PREFETCH = 3
+        const val TAG = "AutomataFeed"
     }
 }
